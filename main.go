@@ -231,6 +231,7 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
 		server.Clock.Increment()
 		msg := Message{
 			Transcript: input,
