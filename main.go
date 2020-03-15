@@ -255,7 +255,7 @@ func main() {
 				}
 				defer client.Close()
 				client.Call("Server.MessagePost", msg, ServerReply{})
-			}(delay*1000, address)
+			}(delay*delay*1000, address)
 		}
 	}
 }
