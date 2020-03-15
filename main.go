@@ -167,7 +167,6 @@ func loadAddresses(server *Server) {
 		addr := scanner.Text()
 		if addr == server.ID {
 			server.Clock.SelfIndex = i
-			continue
 		}
 		addresses = append(addresses, idToAddress(addr))
 	}
@@ -222,7 +221,7 @@ func main() {
 	// Construct the server. Order of these calls are important.
 	setServerID(server, ip, port)
 	loadAddresses(server)
-	setServerClock(server, len(addresses)+1)
+	setServerClock(server, len(addresses))
 	rpc.Register(server)
 	// Run the server.
 	go runServer(server)
@@ -238,8 +237,15 @@ func main() {
 			OID:        server.ID,
 			Timestamp:  server.Clock.Copy(),
 		}
+
 		// multicast the message
 		for i, address := range addresses {
+			delay := server.Clock.SelfIndex - i
+			if delay == 0 {
+				continue
+			} else if delay < 0 {
+				delay *= -1
+			}
 			go func(delay int, address Address) {
 				time.Sleep(time.Duration(delay) * time.Millisecond)
 				client, err := rpc.Dial("tcp", address.IP+":"+address.Port)
@@ -249,7 +255,7 @@ func main() {
 				}
 				defer client.Close()
 				client.Call("Server.MessagePost", msg, ServerReply{})
-			}(i*1000, address)
+			}(delay*1000, address)
 		}
 	}
 }
