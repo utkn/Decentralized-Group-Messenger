@@ -6,12 +6,62 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type VectorClk struct {
-	Size   int
-	Values []int
+	Values    []int
+	SelfIndex int
+}
+
+func (v VectorClk) String() string {
+	vals := []string{}
+	for _, val := range v.Values {
+		vals = append(vals, strconv.Itoa(val))
+	}
+	return "<" + strings.Join(vals, " ") + ">"
+}
+
+func (v VectorClk) Copy() VectorClk {
+	vc := VectorClk{}
+	vc.SelfIndex = v.SelfIndex
+	vc.Values = make([]int, len(v.Values))
+	for i := 0; i < len(v.Values); i++ {
+		vc.Values[i] = v.Values[i]
+	}
+	return vc
+}
+
+func (v *VectorClk) Update(ts VectorClk) {
+	for i := 0; i < len(ts.Values); i++ {
+		if ts.Values[i] > v.Values[i] {
+			v.Values[i] = ts.Values[i]
+		}
+	}
+	fmt.Println("Updated my clock:", *v)
+}
+
+func (v *VectorClk) Increment() {
+	v.Values[v.SelfIndex] = v.Values[v.SelfIndex] + 1
+	fmt.Println("Incremented my clock:", *v)
+}
+
+func (clock VectorClk) ValidateTS(ts VectorClk) bool {
+	senderIndex := ts.SelfIndex
+	if ts.Values[senderIndex]-clock.Values[senderIndex] != 1 {
+		return false
+	}
+	for i := 0; i < len(ts.Values); i++ {
+		if i == senderIndex {
+			continue
+		}
+		if ts.Values[i] > clock.Values[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type Address struct {
@@ -20,10 +70,9 @@ type Address struct {
 }
 
 type Message struct {
-	Transcript  string
-	OID         string
-	SenderIndex int
-	Timestamp   VectorClk
+	Transcript string
+	OID        string
+	Timestamp  VectorClk
 }
 
 func (m Message) String() string {
@@ -36,7 +85,6 @@ type Server struct {
 	ID                string
 	Port              string
 	IP                string
-	Index             int
 	Clock             VectorClk
 	postponedMessages []Message
 	deliveredMessages []Message
@@ -45,14 +93,13 @@ type Server struct {
 func (s *Server) deliverMsg(msg Message) {
 	s.deliveredMessages = append(s.deliveredMessages, msg)
 	fmt.Println(msg)
-	fmt.Print("> ")
 }
 
 func (s *Server) deliverPostponedMessages() {
 	for {
 		deliveredIndexes := make(map[int]struct{}, len(s.postponedMessages))
 		for i, msg := range s.postponedMessages {
-			if s.Clock.ValidateTS(msg.Timestamp, msg.SenderIndex) {
+			if s.Clock.ValidateTS(msg.Timestamp) {
 				s.Clock.Update(msg.Timestamp)
 				s.deliverMsg(msg)
 				deliveredIndexes[i] = struct{}{}
@@ -69,10 +116,21 @@ func (s *Server) deliverPostponedMessages() {
 	}
 }
 
+func (s *Server) printBuffer() {
+	vals := []string{}
+	fmt.Print("Current buffer: [")
+	for _, msg := range s.postponedMessages {
+		vals = append(vals, msg.Transcript+msg.Timestamp.String())
+	}
+	fmt.Print(strings.Join(vals, ", "))
+	fmt.Println("]")
+}
+
 func (s *Server) MessagePost(msg *Message, reply *ServerReply) error {
+	fmt.Println("Received", msg, msg.Timestamp)
 	s.postponedMessages = append(s.postponedMessages, *msg)
-	// Directly deliver the message for now.
 	s.deliverPostponedMessages()
+	s.printBuffer()
 	return nil
 }
 
@@ -83,37 +141,7 @@ func setServerID(s *Server, ip string, port string) {
 }
 
 func setServerClock(s *Server, size int) {
-	s.Clock = VectorClk{
-		Size:   size,
-		Values: make([]int, size),
-	}
-}
-
-func incrementClock(s *Server) {
-	s.Clock.Values[s.Index]++
-}
-
-func (clock VectorClk) ValidateTS(ts VectorClk, senderIndex int) bool {
-	if ts.Values[senderIndex]-clock.Values[senderIndex] != 1 {
-		return false
-	}
-	for i := 0; i < ts.Size; i++ {
-		if i == senderIndex {
-			continue
-		}
-		if ts.Values[i] > clock.Values[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (clock *VectorClk) Update(ts VectorClk) {
-	for i := 0; i < ts.Size; i++ {
-		if ts.Values[i] > clock.Values[i] {
-			clock.Values[i] = ts.Values[i]
-		}
-	}
+	s.Clock.Values = make([]int, size)
 }
 
 var addresses []Address
@@ -138,7 +166,7 @@ func loadAddresses(server *Server) {
 		i++
 		addr := scanner.Text()
 		if addr == server.ID {
-			server.Index = i
+			server.Clock.SelfIndex = i
 			continue
 		}
 		addresses = append(addresses, idToAddress(addr))
@@ -184,7 +212,6 @@ func getSelfIP() string {
 func main() {
 	var port string
 	if len(os.Args) < 2 {
-		fmt.Print("> Port: ")
 		port = "8081"
 	} else {
 		port = os.Args[1]
@@ -199,22 +226,21 @@ func main() {
 	rpc.Register(server)
 	// Run the server.
 	go runServer(server)
-	fmt.Println("Welcome to the chat room.")
+	fmt.Println("Welcome to the chat room,", server.ID)
+	fmt.Printf("Index: %d\n", server.Clock.SelfIndex)
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("> ")
 		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-		incrementClock(server)
+		server.Clock.Increment()
 		msg := Message{
-			Transcript:  input,
-			OID:         server.ID,
-			SenderIndex: server.Index,
-			Timestamp:   server.Clock,
+			Transcript: input,
+			OID:        server.ID,
+			Timestamp:  server.Clock.Copy(),
 		}
 		// multicast the message
-		for _, address := range addresses {
-			go func(address Address) {
+		for i, address := range addresses {
+			go func(delay int, address Address) {
+				time.Sleep(time.Duration(delay) * time.Millisecond)
 				client, err := rpc.Dial("tcp", address.IP+":"+address.Port)
 				if err != nil {
 					fmt.Println("Could not connect to the peer", address.IP+"/"+address.Port)
@@ -222,7 +248,7 @@ func main() {
 				}
 				defer client.Close()
 				client.Call("Server.MessagePost", msg, ServerReply{})
-			}(address)
+			}(i*1000, address)
 		}
 	}
 }
